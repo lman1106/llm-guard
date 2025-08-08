@@ -11,6 +11,12 @@ from llm_guard.fact_check import FactChecker, classify_risk_domain
 from llm_guard.model_providers.base import get_model_provider
 from llm_guard.rate_limit import estimate_token_count
 
+# llmguard scanners
+from llm_guard.evaluate import scan_prompt as llmguard_scan_prompt, scan_output as llmguard_scan_output
+from llm_guard.input_scanners.regex import Regex as LLMGuardPromptRegex
+from llm_guard.input_scanners.prompt_injection import PromptInjection as LLMGuardPromptInjection
+from llm_guard.output_scanners.regex import Regex as LLMGuardOutputRegex
+
 
 class SafetyPipeline:
     def __init__(self, settings: Settings) -> None:
@@ -47,6 +53,23 @@ class SafetyPipeline:
             endpoint=settings.model.endpoint,
         )
 
+        # Build llmguard scanner lists based on config
+        self.llmguard_prompt_scanners = []
+        if s.llmguard.enabled and s.llmguard.prompt_regex.enabled:
+            self.llmguard_prompt_scanners.append(
+                LLMGuardPromptRegex(patterns=s.llmguard.prompt_regex.patterns, is_blocked=True, match_type="all", redact=False)
+            )
+        if s.llmguard.enabled and s.llmguard.prompt_injection.enabled:
+            self.llmguard_prompt_scanners.append(
+                LLMGuardPromptInjection(threshold=s.llmguard.prompt_injection.threshold, match_type=s.llmguard.prompt_injection.match_type)
+            )
+
+        self.llmguard_output_scanners = []
+        if s.llmguard.enabled and s.llmguard.output_regex.enabled:
+            self.llmguard_output_scanners.append(
+                LLMGuardOutputRegex(patterns=s.llmguard.output_regex.patterns, is_blocked=True, redact=s.llmguard.output_regex.redact)
+            )
+
     def check_access(self, role: str) -> bool:
         roles = self.settings.access_control.roles
         if role not in roles:
@@ -69,32 +92,32 @@ class SafetyPipeline:
         if not self.check_access(role):
             return {"error": "unauthorized role"}
 
-        # Resource exhaustion: token length check
         max_tokens = self.settings.security.resource_exhaustion.max_prompt_tokens
         if estimate_token_count(prompt) > max_tokens:
             return {"error": "prompt too long"}
 
-        # Prohibited auto-generation enforcement (LLM09)
         violated = self.violates_prohibited_autogen(prompt)
         if violated:
             return {"error": "prohibited auto-generation", "category": violated}
 
-        # Prompt injection detection
+        # llmguard integrated prompt scanning (pre-generation)
+        if self.llmguard_prompt_scanners:
+            _, prompt_valid_map, prompt_scores = llmguard_scan_prompt(self.llmguard_prompt_scanners, prompt, fail_fast=True)
+            if any(v is False for v in prompt_valid_map.values()):
+                return {"error": "blocked by llmguard prompt scanners", "scanners": prompt_valid_map, "scores": prompt_scores}
+
         inj = self.prompt_detector.analyze(prompt) if self.settings.security.prompt_injection.enabled else None
         if inj and inj.is_malicious and inj.requires_human_approval:
             return {"error": "requires human approval", "reasons": inj.reasons}
 
-        # Generate using model
         system_prompt = self.settings.app.system_prompt
         temperature = self.settings.model.temperature
         model_output = await self.model.generate(system_prompt=system_prompt, user_prompt=prompt, temperature=temperature)
 
-        # System prompt disclosure detection
         leak = self.system_prompt_leak.analyze(model_output) if self.settings.security.system_prompt_disclosure.enabled else None
         if leak and leak.is_leak:
             model_output = "[BLOCKED: potential system prompt disclosure detected]"
 
-        # Sensitive info filtering (LLM02) unless role allowed
         masked_output = model_output
         sensitive_matches = []
         if self.settings.security.sensitive_output.enabled and not self.role_can_view_sensitive(role):
@@ -102,12 +125,16 @@ class SafetyPipeline:
             if self.settings.security.sensitive_output.mask_policy == "block" and sensitive_matches:
                 masked_output = "[BLOCKED: sensitive information detected]"
 
-        # Improper output handling (LLM05)
         scan = self.output_scanner.scan(masked_output) if self.settings.security.improper_output.enabled else None
         if scan and scan.is_high_risk:
             masked_output = "[REVIEW REQUIRED: high-risk content detected]"
 
-        # Inaccurate information checks (LLM09)
+        # llmguard integrated output scanning (post-generation)
+        if self.llmguard_output_scanners:
+            masked_output, out_valid_map, out_scores = llmguard_scan_output(self.llmguard_output_scanners, prompt, masked_output, fail_fast=True)
+            if any(v is False for v in out_valid_map.values()):
+                return {"error": "blocked by llmguard output scanners", "scanners": out_valid_map, "scores": out_scores}
+
         risk_level = classify_risk_domain(prompt, self.settings.security.inaccurate_info.high_risk_domains)
         fact_result = None
         if self.settings.security.inaccurate_info.enabled and risk_level == "high":
@@ -120,6 +147,5 @@ class SafetyPipeline:
             "system_prompt_leak": leak.__dict__ if leak else None,
             "sensitive_matches": [m.__dict__ for m in sensitive_matches],
             "improper_output": scan.__dict__ if scan else None,
-            "fact_check": fact_result.__dict__ if fact_result else None,
             "output": masked_output,
         }
