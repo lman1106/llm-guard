@@ -97,6 +97,28 @@ security:
     priority_users:
       - "admin"
 
+  llmguard:
+    enabled: true
+    prompt_regex:
+      enabled: true
+      patterns:
+        - '(?i)ignore\s+(all|previous)\s+(rules|instructions)'
+        - '(?i)system\s+prompt'
+        - '(?i)管理员\s*密码'
+        - '(?i)jailbreak'
+    prompt_injection:
+      enabled: false
+      threshold: 0.92
+      match_type: full
+    output_regex:
+      enabled: true
+      patterns:
+        - '(?i)<script>'
+        - '(?i)eval\('
+        - '(?i)os\.system\('
+        - '(?i)DROP\s+TABLE'
+      redact: true
+
 access_control:
   roles:
     user:

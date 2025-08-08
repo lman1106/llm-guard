@@ -92,6 +92,30 @@ class ObservabilityConfig(BaseModel):
     siem_webhook: str | None = None
 
 
+class LLMGuardPromptRegex(BaseModel):
+    enabled: bool = False
+    patterns: list[str] = Field(default_factory=list)
+
+
+class LLMGuardPromptInjection(BaseModel):
+    enabled: bool = False
+    threshold: float = 0.92
+    match_type: str = "full"
+
+
+class LLMGuardOutputRegex(BaseModel):
+    enabled: bool = False
+    patterns: list[str] = Field(default_factory=list)
+    redact: bool = True
+
+
+class LLMGuardConfig(BaseModel):
+    enabled: bool = False
+    prompt_regex: LLMGuardPromptRegex = Field(default_factory=LLMGuardPromptRegex)
+    prompt_injection: LLMGuardPromptInjection = Field(default_factory=LLMGuardPromptInjection)
+    output_regex: LLMGuardOutputRegex = Field(default_factory=LLMGuardOutputRegex)
+
+
 class SecurityConfig(BaseModel):
     prompt_injection: PromptInjectionConfig = Field(default_factory=PromptInjectionConfig)
     sensitive_output: SensitiveOutputConfig = Field(default_factory=SensitiveOutputConfig)
@@ -100,6 +124,7 @@ class SecurityConfig(BaseModel):
     vector_embedding: VectorEmbeddingConfig = Field(default_factory=VectorEmbeddingConfig)
     inaccurate_info: InaccurateInfoConfig = Field(default_factory=InaccurateInfoConfig)
     resource_exhaustion: ResourceExhaustionConfig = Field(default_factory=ResourceExhaustionConfig)
+    llmguard: LLMGuardConfig = Field(default_factory=LLMGuardConfig)
 
 
 class Settings(BaseModel):
